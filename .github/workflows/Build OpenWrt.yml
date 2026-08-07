@@ -1,3 +1,8 @@
+###########################################################
+# 矩阵并行编译：ledex86 / immortalwrtx86 / meson8b
+# 修复 matrix 读取 github.event.inputs 报错
+# 整合三份yml全部功能，统一维护
+###########################################################
 name: Build OpenWrt Matrix
 
 permissions:
@@ -103,6 +108,7 @@ jobs:
           echo "OP_IP=${{ needs.Prepare.outputs.OP_IP }}" >> $GITHUB_ENV
           echo "BUILTIN_CONFIG=${{ needs.Prepare.outputs.BUILTIN_CONFIG }}" >> $GITHUB_ENV
           echo "UPLOAD_RELEASES=${{ needs.Prepare.outputs.UPLOAD_RELEASES }}" >> $GITHUB_ENV
+
           # 拆分矩阵源码地址
           SRC_STR=${{ matrix.build.source }}
           REPO_URL="https://github.com/$(cut -d \: -f 1 <<< $SRC_STR)"
@@ -113,6 +119,7 @@ jobs:
           echo "REPO_USER=$REPO_USER" >> $GITHUB_ENV
           REPO_NAME="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
           echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+
           CONFIG_REPO_URL="https://z89pcszxqd:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/z89pcszxqd/BUILTIN_CONFIG.git"
           echo "CONFIG_REPO_URL=${CONFIG_REPO_URL}" >> $GITHUB_ENV
           echo "CONFIG_FILE=${{ matrix.build.config_file }}" >> $GITHUB_ENV
