@@ -1,6 +1,5 @@
 ###########################################################
 # 矩阵并行编译：ledex86 / immortalwrtx86 / meson8b
-# 修复 matrix 读取 github.event.inputs 报错
 # 整合三份yml全部功能，统一维护
 ###########################################################
 name: Build OpenWrt Matrix
@@ -27,7 +26,7 @@ on:
         default: 'true'
         type: boolean
       UPLOAD_RELEASES:
-        description: '上传固件到 Releases '
+        description: '上传固件到 Releases'
         default: 'true'
         type: boolean
 
@@ -89,7 +88,7 @@ jobs:
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig tree texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig tree texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo timedatectl set-timezone Asia/Shanghai
@@ -143,7 +142,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
-          echo "VERSION_INFO=$(git show -s --date=short --format="作者: %an<br />时间: %cd<br />提交信息: %s<br />Commit Hash: %H")" >> $GITHUB_ENV
+          echo "VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")" >> $GITHUB_ENV
 
       - name: 拉取内置配置
         if: env.BUILTIN_CONFIG == 'true'
