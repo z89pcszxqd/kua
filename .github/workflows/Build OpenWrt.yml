@@ -152,7 +152,7 @@ jobs:
         if: ${{ env.CONFIG_FILE == 'meson8b' }}
         run: |
           [ -e Scripts/target ] && cp -rf Scripts/target openwrt
-          chmod -Rf 755 target/linux/amlogic
+          chmod -Rf 777 openwrt/target/linux/amlogic
 
       - name: 运行DIY脚本
         run: |
