@@ -79,7 +79,7 @@ jobs:
           # lede meson8b
           - name: meson8b
             config_file: meson8b
-            source: openwrt/openwrt:openwrt-24.10
+            source: immortalwrt/immortalwrt:openwrt-24.10
             fw_tag: meson8b
             img_pattern: "*emmc.burn.img.xz"
             target_arch: armv7
