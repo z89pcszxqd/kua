@@ -318,3 +318,13 @@ Firmware_Diy_2() {
         rm -rf BUILTIN_CONFIG
     fi
 }
+
+
+
+
+
+
+# 强制启用（防止 defconfig 被清掉）
+echo "CONFIG_PACKAGE_luci-app-harbor-file=y" >> .config
+echo "CONFIG_PACKAGE_luci-i18n-harbor-file-zh-cn=y" >> .config
+make defconfig
