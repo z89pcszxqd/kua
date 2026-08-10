@@ -1,0 +1,329 @@
+###########################################################
+# Description: Compile OpenWrt by GitHub Actions
+#
+# Based on: https://github.com/P3TERX/Actions-OpenWrt
+#
+# Author: Hyy2001X
+###########################################################
+name: immortalwrtx86
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  repository_dispatch:
+  ## Git Push 时触发编译(不要删除此行注释)
+  #push:
+  #  branches:
+  #    - master
+  ## 定时触发编译(不要删除此行注释)
+  # schedule:
+  #   - cron: 0 8 * * 5
+  ## 重新点亮 Star 时触发编译(不要删除此行注释)
+  watch:
+    types: [started]
+
+  ### 界面控制部分 ( 以下内容请保持不变, 如有需要仅修改 options 选项 )
+  workflow_dispatch:
+    inputs:
+      Tempoary_CONFIG:
+        description: '配置文件'
+        default: 'immortalwrtx86'
+        type: choice
+        options:
+          - 'immortalwrtx86'
+      Code_SOURCE:
+        description: '仓库源码'
+        default: 'immortalwrt/immortalwrt:openwrt-24.10'
+        type: choice
+        options:
+          - 'immortalwrt/immortalwrt:openwrt-24.10'
+      OP_IP:
+        description: '静态IP地址'
+        default: '192.168.9.253'
+        type: choice
+        options:
+          - '192.168.9.1'
+          - '192.168.9.253'
+      BUILTIN_CONFIG:
+        description: '内置配置信息'
+        default: 'true'
+        type: boolean
+      UPLOAD_RELEASES:
+        description: '上传固件到 Releases'
+        default: 'true'
+        type: boolean
+
+env:
+  # 编译时调用的 [.config] 文件名称
+  CONFIG_FILE: ${{ github.event.inputs.Tempoary_CONFIG }}
+  # 源码仓库:分支
+  DEFAULT_SOURCE: ${{ github.event.inputs.Code_SOURCE }}
+  # 删除无用文件以增加编译空间
+  DELETE_USELESS_FILES: true
+  # Cache 加速编译
+  CACHE_ACCELERATE: true
+  ### 结束
+  FIRMWARE_TAG: immortalwrtx86
+  ### 请按需求修改以上内容
+
+jobs:
+  Compile:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 展示系统信息
+        run: |
+          echo -e "Total CPU cores\t: $(nproc)"
+          cat /proc/cpuinfo | grep 'model name'
+
+      # --- 核心修改：优化 CPU 校验步骤 ---
+      # 逻辑：发现 CPU 不行 -> 调用 API 触发一个全新的工作流运行 -> 当前任务正常结束 (exit 0)
+      - name: 查看Action服务器性能 & CPU型号校验，不匹配自动重跑
+        run: |
+          echo "警告⚠"
+          echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+          echo -e "允许的CPU型号(性能由高到低): 9V45，9V74，8573C，8370C\n"
+          echo "--------------------------CPU信息--------------------------"
+          CPU_FULL=$(cat /proc/cpuinfo | grep -m1 'model name' | awk -F: '{print $2}' | xargs)
+          echo "CPU物理数量: $(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+          echo "CPU核心数量: $(nproc)"
+          echo "CPU完整型号: ${CPU_FULL}"
+          # CPU白名单
+          ALLOW_CPU_LIST=("9V45" "9V74" "8573C" "8370C")
+          MATCH_FLAG=0
+          for target in "${ALLOW_CPU_LIST[@]}"; do
+            if [[ "${CPU_FULL}" == *"${target}"* ]]; then
+              MATCH_FLAG=1
+              break
+            fi
+          done
+          # 读取当前重试次数，限制最多重跑10次
+          MAX_RETRY=10
+          RUN_COUNT=${{ github.run_attempt }}
+          echo "当前运行轮次：$RUN_COUNT / 最大重试 $MAX_RETRY"
+          if [[ ${MATCH_FLAG} -eq 0 ]]; then
+            echo "::warning::当前CPU【${CPU_FULL}】不在允许列表，性能不足！"
+            if [[ $RUN_COUNT -ge $MAX_RETRY ]]; then
+              echo "::error::已达到最大重试次数$MAX_RETRY，不再重跑，任务终止"
+              exit 1
+            fi
+            # --- 优化点：引入指数退避等待 ---
+            WAIT_TIME=$((5**RUN_COUNT))
+            echo "即将在 ${WAIT_TIME} 秒后自动触发新的工作流运行，等待调度更高性能机器..."
+            sleep ${WAIT_TIME}
+            # 核心改动：使用工作流文件名触发，这是最可靠的方式
+            # 请将 'x86.yml' 替换为你实际的 workflow 文件名
+            WORKFLOW_FILE="immortalwrtx86.yml"
+            echo "正在通过 API 触发新的工作流运行..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: token ${{ github.token }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_FILE}/dispatches" \
+              -d "{\"ref\":\"${{ github.ref_name }}\"}")
+            if [[ "$HTTP_CODE" == "204" ]]; then
+              echo "✅ 新的工作流运行已成功触发！当前任务将正常结束。"
+            else
+              echo "::warning::触发新运行失败，HTTP状态码: $HTTP_CODE。当前任务仍将正常结束，请稍后手动重试。"
+            fi
+            # 无论 API 调用成功与否，当前任务都正常退出，避免触发 GitHub 的“取消后不自动重跑”限制
+            exit 1
+          fi
+          echo "✅ CPU型号校验通过，继续执行后续步骤..."
+
+      - name: 初始化环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig tree texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone Asia/Shanghai
+          sudo mkdir -p /workdir
+          sudo chown $USER:$GROUPS /workdir
+
+      - name: 更新时区、编译时间、环境变量
+        id: date
+        run: |
+          echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+          echo "FILE_TIME1=$(date "+%Y年%m月%d日-%H点%M分")" >> $GITHUB_ENV
+          echo "FILE_TIME2=$(date "+%Y%m%d-%H%M")" >> $GITHUB_ENV
+          echo "编译开始时间..."
+          START_TIME=`date +'%Y-%m-%d %H:%M:%S'`
+          echo "START_SECONDS=$(date --date="$START_TIME" +%s)" >> $GITHUB_ENV
+          echo "OP_IP=${{ github.event.inputs.OP_IP }}" >> $GITHUB_ENV
+          REPO_URL="https://github.com/$(cut -d \: -f 1 <<< ${{ env.DEFAULT_SOURCE }})"
+          REPO_BRANCH=$(cut -d \: -f 2 <<< ${{ env.DEFAULT_SOURCE }})
+          echo "REPO_URL=$REPO_URL" >> $GITHUB_ENV
+          echo "REPO_BRANCH=$REPO_BRANCH" >> $GITHUB_ENV
+          REPO_USER="$(echo $REPO_URL | awk -F '/' '{print $(NF-1)}')"
+          echo "REPO_USER=$REPO_USER" >> $GITHUB_ENV
+          REPO_NAME="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
+          echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+          echo "BUILTIN_CONFIG=${{ github.event.inputs.BUILTIN_CONFIG }}" >> $GITHUB_ENV
+          echo "UPLOAD_RELEASES=${{ github.event.inputs.UPLOAD_RELEASES }}" >> $GITHUB_ENV
+          CONFIG_REPO_URL="https://z89pcszxqd:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/z89pcszxqd/BUILTIN_CONFIG.git"
+          echo "CONFIG_REPO_URL=${CONFIG_REPO_URL}" >> $GITHUB_ENV
+
+      - name: 合并磁盘
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
+
+      - name: 检查分支
+        uses: actions/checkout@main
+
+      - name: 克隆Openwrt源代码
+        run: |
+          git clone -b $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+          echo "VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")" >> $GITHUB_ENV
+
+      - name: 加载自定义变量
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/Scripts/Diy.sh"
+          cd openwrt
+          cp $GITHUB_WORKSPACE/Configs/$CONFIG_FILE .config && make defconfig
+          source $GITHUB_WORKSPACE/Scripts/Diy.sh
+          DEVICE_TARGET="$(awk -F '"' '/CONFIG_TARGET_BOARD/ {print $2; exit}' .config)"
+          DEVICE_SUBTARGET="$(awk -F '"' '/CONFIG_TARGET_SUBTARGET/ {print $2; exit}' .config)"
+          echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+          echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+          Firmware_Diy_1
+          Firmware_Diy_2
+
+      - name: 检查变量
+        run: |
+          echo 仓库地址: "${{ env.REPO_URL }}"
+          echo 仓库分支: "${{ env.REPO_BRANCH }}"
+          echo 仓库作者名: "${{ env.REPO_USER }}"
+          echo 仓库源码名: "${{ env.REPO_NAME }}"
+          echo 内核版本: "${{ env.KERNEL_PATCHVER }}"
+          echo 目标架构: "${{ env.DEVICE_TARGET }}"
+          echo 子架构: "${{ env.DEVICE_SUBTARGET }}"
+
+      - name: 缓存工具链
+        uses: actions/cache@main
+        with:
+          key: ${{ env.REPO_NAME }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.KERNEL_PATCHVER }}-${{env.WRT_HASH}}
+          restore-keys: ${{ env.REPO_NAME }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.KERNEL_PATCHVER }}
+          path: |
+            ./openwrt/.ccache
+            ./openwrt/staging_dir
+
+      - name: 维护与更新缓存
+        if: env.WRT_TEST != 'true' && !cancelled()
+        run: |
+          if [ -d "./openwrt/staging_dir" ]; then
+            find "./openwrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
+              find "$DIR" -type f -exec touch {} +
+            done
+            mkdir -p ./openwrt/tmp && echo "1" > ./openwrt/tmp/.build
+            echo "已成功跳过工具链!"
+          else
+            echo "缓存丢失!"
+          fi
+
+          # 清理旧缓存（需要 GITHUB_TOKEN 权限）
+          if [ "${{ steps.check-cache.outputs.cache-hit }}" != 'true' ]; then
+            gh cache list --key "${{ env.REPO_NAME }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.KERNEL_PATCHVER }}" | cut -f 1 | xargs -r -n 1 gh cache delete || true
+            echo "旧缓存清理完毕!"
+          fi
+
+      - name: 生成config
+        run: |
+          cd openwrt && make defconfig && ./scripts/diffconfig.sh > AAA.txt
+          cat AAA.txt
+
+      - name: 配置文件上传Github Artifacts
+        uses: actions/upload-artifact@main
+        with:
+          name: immortalwrtx86
+          path: openwrt/AAA.txt
+
+      - name: 下载DL库
+        run: |
+          cd openwrt
+          ./scripts/feeds install -a
+          make defconfig
+          make download -j8
+
+      - name: 构建OpenWrt
+        id: compile
+        run: |
+          cd openwrt
+          echo -e "$(nproc)线程编译固件"
+          make -j$(nproc) || make -j1 V=s
+          du -h ./ --max-depth=1 && tree -a -L 2
+          # 打印一条分割线，用于在满屏滚动的编译日志中做视觉分隔，方便肉眼快速定位空间报告
+          echo "======================="
+          # 查看整个磁盘分区的总体使用情况（总容量、已用、剩余、挂载点等），确认当前编译环境所在的硬盘是否快满了
+          df -h
+          # 再打印一条分割线，将磁盘分区总览与下面的目录占用详情隔开
+          echo "======================="
+          # 统计当前目录（通常是 OpenWRT 源码根目录）下各个一级子文件夹的大小
+          # --max-depth=1 表示只统计到第一层子目录，不深入递归
+          # --exclude=build_dir 和 --exclude=bin 排除了这两个体积巨大的目录，以便快速看清源码、feeds库等其他目录的占用情况
+          du -h --max-depth=1 ./ --exclude=build_dir --exclude=bin
+          # 单独统计 build_dir 目录下各个一级子目录的大小
+          # build_dir 存放了所有软件包解压后的源码和编译中间文件，通常是整个编译过程中占用空间最大的“重灾区”
+          du -h --max-depth=1 ./build_dir
+          # 单独统计 bin 目录下各个一级子目录的大小
+          # 编译完成后，最终生成的固件文件（.bin 或 .img）和各类 .ipk 软件包都会输出到这个目录
+          du -h --max-depth=1 ./bin
+
+      - name: 计算编译时间
+        run: |
+          echo "编译完成时间..."
+          START_SECONDS=${{ env.START_SECONDS }}
+          END_TIME=`date +'%Y-%m-%d %H:%M:%S'`
+          END_SECONDS=$(date --date="$END_TIME" +%s)
+          SECONDS=$((END_SECONDS-START_SECONDS))
+          HOUR=$(( $SECONDS/3600 )) && MIN=$(( ($SECONDS-${HOUR}*3600)/60 )) && SEC=$(( $SECONDS-${HOUR}*3600-${MIN}*60 ))
+          echo "BUILD_TIME=${HOUR}时${MIN}分${SEC}秒" >> $GITHUB_ENV
+
+      - name: 整理编译文件
+        if: steps.compile.outcome == 'success' && !cancelled()
+        run: |
+          cd openwrt/bin/targets/*/*
+          cat sha256sums
+          echo "WRT_LIST=$(find -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
+          rm -rf *.buildinfo* *kernel* *.manifest* profiles.json *ext4* *rootfs* sha256sums
+          sleep 10
+          mv *squashfs-combined.img.gz ${{ env.REPO_NAME }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.KERNEL_PATCHVER }}-${{ env.FILE_TIME2 }}-uefi.img.gz
+          echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+
+      - name: 上传固件 Release
+        if: env.UPLOAD_RELEASES == 'true' && steps.compile.outcome == 'success' && !cancelled()
+        uses: ncipollo/release-action@v1
+        with:
+          name: R${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
+          allowUpdates: true
+          tag: ${{ env.REPO_NAME }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.FIRMWARE_PATH }}/*
+          removeArtifacts: true
+          body: |
+            - 固件编译时间：${{ env.BUILD_TIME }}
+            - 固件内核版本：**${{ env.KERNEL_PATCHVER }}**
+            - 插件列表：
+              - ${{ env.WRT_LIST }}
+            - 固件编译前最后一次➦[主源码](${{ env.REPO_URL }})更新记录
+            - ${{ env.VERSION_INFO }}
+
+      - name: 删除运行记录
+        if: always() # 核心：无论前面成功、失败还是取消，都运行这一步
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0
