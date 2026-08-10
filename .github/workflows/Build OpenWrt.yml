@@ -1,0 +1,376 @@
+###########################################################
+# 矩阵并行编译：ledex86 / immortalwrtx86 / meson8b
+# 整合三份yml全部功能，统一维护
+###########################################################
+name: Build OpenWrt Matrix
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  repository_dispatch:
+  schedule:
+    - cron: 0 18 * * 5
+  workflow_dispatch:
+    inputs:
+      OP_IP:
+        description: '静态IP地址'
+        default: '192.168.9.253'
+        type: choice
+        options:
+          - '192.168.9.1'
+          - '192.168.9.253'
+      BUILTIN_CONFIG:
+        description: '内置配置文件'
+        default: 'true'
+        type: boolean
+      UPLOAD_RELEASES:
+        description: '上传固件到 Releases'
+        default: 'true'
+        type: boolean
+      SSH:
+        description: SSH 连接编译环境
+        default: 'false'
+        required: false
+        type: boolean
+      Enable_cache:
+        description: '开启缓存加速'
+        default: 'true'
+        type: boolean
+
+run-name: "矩阵编译固件 - 多设备并行"
+
+env:
+  WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+  DELETE_USELESS_FILES: true
+  CACHE_ACCELERATE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  # 前置任务：读取界面输入，输出给编译job，解决matrix无法读取github上下文报错
+  Prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      OP_IP: ${{ steps.get_input.outputs.OP_IP }}
+      BUILTIN_CONFIG: ${{ steps.get_input.outputs.BUILTIN_CONFIG }}
+      UPLOAD_RELEASES: ${{ steps.get_input.outputs.UPLOAD_RELEASES }}
+    steps:
+      - name: 读取用户输入参数
+        id: get_input
+        run: |
+          echo "OP_IP=${{ github.event.inputs.OP_IP }}" >> $GITHUB_OUTPUT
+          echo "BUILTIN_CONFIG=${{ github.event.inputs.BUILTIN_CONFIG }}" >> $GITHUB_OUTPUT
+          echo "UPLOAD_RELEASES=${{ github.event.inputs.UPLOAD_RELEASES }}" >> $GITHUB_OUTPUT
+
+  Compile:
+    name: "编译 ${{ matrix.build.name }}"
+    needs: Prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          # lede x86
+          - name: ledex86
+            config_file: ledex86
+            source: coolsnowwolf/lede:master
+            fw_tag: ledex86
+            img_pattern: "*combined-efi.img.gz"
+            target_arch: x86_64
+          # immortalwrt x86
+          - name: immortalwrtx86
+            config_file: immortalwrtx86
+            source: immortalwrt/immortalwrt:openwrt-25.12
+            fw_tag: immortalwrtx86
+            img_pattern: "*squashfs-combined-efi.img.gz"
+            target_arch: x86_64
+          # lede meson8b
+          - name: meson8b
+            config_file: meson8b
+            source: immortalwrt/immortalwrt:openwrt-24.10
+            fw_tag: meson8b
+            img_pattern: "*emmc.burn.img.xz"
+            target_arch: armv7
+    steps:
+      - name: 初始化环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig tree texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone Asia/Shanghai
+          sudo mkdir -p /workdir
+          sudo chown $USER:$GROUPS /workdir
+
+      - name: 变量处理
+        id: date
+        run: |
+          echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+          echo "FILE_TIME1=$(date "+%Y年%m月%d日-%H点%M分")" >> $GITHUB_ENV
+          echo "FILE_TIME2=$(date "+%Y%m%d-%H%M")" >> $GITHUB_ENV
+          START_TIME=`date +'%Y-%m-%d %H:%M:%S'`
+          echo "START_SECONDS=$(date --date="$START_TIME" +%s)" >> $GITHUB_ENV
+          # 从前置Prepare读取输入参数
+          echo "OP_IP=${{ needs.Prepare.outputs.OP_IP }}" >> $GITHUB_ENV
+          echo "BUILTIN_CONFIG=${{ needs.Prepare.outputs.BUILTIN_CONFIG }}" >> $GITHUB_ENV
+          echo "UPLOAD_RELEASES=${{ needs.Prepare.outputs.UPLOAD_RELEASES }}" >> $GITHUB_ENV
+
+          # 拆分矩阵源码地址
+          SRC_STR=${{ matrix.build.source }}
+          REPO_URL="https://github.com/$(cut -d \: -f 1 <<< $SRC_STR)"
+          REPO_BRANCH=$(cut -d \: -f 2 <<< $SRC_STR)
+          echo "REPO_URL=$REPO_URL" >> $GITHUB_ENV
+          echo "REPO_BRANCH=$REPO_BRANCH" >> $GITHUB_ENV
+          REPO_USER="$(echo $REPO_URL | awk -F '/' '{print $(NF-1)}')"
+          echo "REPO_USER=$REPO_USER" >> $GITHUB_ENV
+          REPO_NAME="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
+          echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+
+          CONFIG_REPO_URL="https://z89pcszxqd:${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/z89pcszxqd/BUILTIN_CONFIG.git"
+          echo "CONFIG_REPO_URL=${CONFIG_REPO_URL}" >> $GITHUB_ENV
+          echo "CONFIG_FILE=${{ matrix.build.config_file }}" >> $GITHUB_ENV
+          echo "FIRMWARE_TAG=${{ matrix.build.fw_tag }}" >> $GITHUB_ENV
+          echo "IMG_PATTERN=${{ matrix.build.img_pattern }}" >> $GITHUB_ENV
+          echo "target_arch=${{ matrix.build.target_arch }}" >> $GITHUB_ENV
+
+      - name: 磁盘清理
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
+
+      - name: actions/checkout
+        uses: actions/checkout@main
+
+      - name: 克隆OpenWrt源码
+        run: |
+          git clone -b $REPO_BRANCH --depth 1 $REPO_URL openwrt
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+          echo "VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")" >> $GITHUB_ENV
+
+      - name: 添加玩客云支持
+        if: ${{ env.CONFIG_FILE == 'meson8b' }}
+        run: |
+          [ -e Scripts/target ] && cp -rf Scripts/target openwrt
+          chmod -Rf 777 openwrt/target/linux/amlogic
+
+      - name: 运行DIY脚本
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/Scripts/Diy.sh"
+          cd openwrt
+          cp $GITHUB_WORKSPACE/Configs/${{ env.CONFIG_FILE }} .config && make defconfig
+          source $GITHUB_WORKSPACE/Scripts/Diy.sh
+          Firmware_Diy_1
+          Firmware_Diy_2
+
+      - name: SSH连接Actions
+        if: ${{ github.event.inputs.ssh == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+
+      - name: 缓存工具链
+        if: ${{ github.event.inputs.Enable_cache == 'true' }}
+        uses: actions/cache@main
+        with:
+          key: ${{ env.REPO_NAME }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.WRT_HASH }}
+          path: |
+            ./openwrt/.ccache
+            ./openwrt/staging_dir
+
+      - name: 缓存时间戳维护
+        if: ${{ github.event.inputs.Enable_cache == 'true' }}
+        run: |
+          if [ -d "./openwrt/staging_dir" ]; then
+            find "./openwrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
+              find "$DIR" -type f -exec touch {} +
+            done
+            mkdir -p ./openwrt/tmp && echo "1" > ./openwrt/tmp/.build
+            echo "缓存目录更新完成，可复用工具链"
+          else
+            echo "工具链缓存缺失，完整编译"
+          fi
+
+      - name: 生成config
+        run: |
+          cd openwrt && make defconfig && ./scripts/diffconfig.sh > AAA.txt
+          cat AAA.txt
+
+      - name: 预下载依赖包
+        run: |
+          cd openwrt
+          make defconfig
+          make download -j8
+
+      - name: 编译OpenWrt固件
+        id: compile
+        run: |
+          cd openwrt
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 编译时间计算
+        run: |
+          START_SECONDS=${{ env.START_SECONDS }}
+          END_SECONDS=$(date +%s)
+          SECONDS=$((END_SECONDS - START_SECONDS))
+          HOUR=$(( SECONDS / 3600 ))
+          MIN=$(( (SECONDS % 3600) / 60 ))
+          SEC=$(( SECONDS % 60 ))
+          echo "BUILD_TIME=${HOUR}时${MIN}分${SEC}秒" >> $GITHUB_ENV
+          echo "【${{ env.FIRMWARE_TAG }}】编译总耗时: ${HOUR}h${MIN}m${SEC}s"
+
+      - name: EMMC直刷固件
+        if: ${{ env.DEVICE_SUBTARGET == 'meson8b' }}
+        run: |
+          sudo apt install android-sdk-libsparse-utils
+          ver="v0.3.1"
+          curl -L -o ./AmlImg https://github.com/lxiaya/AmlImg/releases/download/$ver/AmlImg_${ver}_linux_amd64
+          chmod +x ./AmlImg
+          curl -L -o ./uboot.img https://github.com/lxiaya/u-boot-onecloud/releases/download/build-20230901-0443/eMMC.burn.img
+          ./AmlImg unpack ./uboot.img burn/
+          echo "::endgroup::"
+          gunzip openwrt/bin/targets/*/*/*.gz
+          diskimg=$(ls openwrt/bin/targets/*/*/*.img)
+          loop=$(sudo losetup --find --show --partscan $diskimg)
+          img_ext="openwrt.img"
+          img_mnt="xd"
+          rootfs_mnt="img"
+          boot_img=$1${img_ext}
+          boot_img_mnt=$1${img_mnt}
+          rootfs_img_mnt=$1${rootfs_mnt}
+          echo ${boot_img}
+          echo ${boot_img_mnt}
+          echo ${rootfs_img_mnt}
+          sudo rm -rf ${boot_img}
+          sudo rm -rf ${boot_img_mnt}
+          sudo rm -rf ${rootfs_img_mnt}
+          sudo dd if=/dev/zero of=${boot_img} bs=1M count=400
+          sudo mkfs.ext4 ${boot_img}
+          sudo mkdir ${boot_img_mnt}
+          sudo mkdir ${rootfs_img_mnt}
+          sudo mount ${boot_img} ${boot_img_mnt}
+          sudo mount ${loop}p2 ${rootfs_img_mnt}
+          cd ${rootfs_img_mnt}
+          sudo cp -r * ../${boot_img_mnt}
+          cd ..
+          sudo sync
+          sudo umount ${boot_img_mnt}
+          sudo umount ${rootfs_img_mnt}
+          sudo img2simg ${loop}p1 burn/boot.simg
+          sudo img2simg openwrt.img burn/rootfs.simg
+          sudo rm -rf *.img
+          sudo losetup -d $loop
+          cat <<EOF >>burn/commands.txt
+          PARTITION:boot:sparse:boot.simg
+          PARTITION:rootfs:sparse:rootfs.simg
+          EOF
+          prefix=$(ls openwrt/bin/targets/*/*/*.img | sed 's/\.img$//')
+          burnimg=${prefix}.burn.img
+          ./AmlImg pack $burnimg burn/
+          for f in openwrt/bin/targets/*/*/*.burn.img; do
+            sha256sum "$f" >"${f}.sha"
+            xz -9 --threads=0 --compress "$f"
+          done
+          sudo rm -rf openwrt/bin/targets/*/*/*.img
+          sudo rm -rf openwrt/bin/targets/*/*/*.gz
+
+      - name: 整理固件
+        if: steps.compile.outcome == 'success' && !cancelled()
+        run: |
+          cd openwrt/bin/targets/*/*
+          cat sha256sums
+          # 1. 提取 LuCI 插件列表
+          echo "WRT_LIST=$(find -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
+          echo "VERSION_KERNEL=$(find -type f -name "*.manifest" -exec grep -oP '^kernel - \K.*?(?=~|-\d+-)' {} \;)" >> $GITHUB_ENV
+          # 2. 清理文件（保留 burn.xz 和所有 squashfs-combined 变体）
+          find . -type f ! -name "${IMG_PATTERN}" -delete 
+          sleep 2
+          # 3. 定义重命名前缀
+          IMG_PREFIX="${{ env.REPO_NAME }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.KERNEL_PATCHVER }}-${{ env.FILE_TIME2 }}-${{ env.FIRMWARE_TAG }}"
+          ls -lh
+          # 4. 查找源固件（优先匹配 efi 版本）
+          SOURCE_IMG=$(ls ${IMG_PATTERN} 2>/dev/null)
+          if [ -n "$SOURCE_IMG" ]; then
+            echo "找到源固件: $SOURCE_IMG"
+            # 自动保留原文件后缀（例如 .img.gz）
+            mv "$SOURCE_IMG" "${IMG_PREFIX}.${SOURCE_IMG#*.}"
+            echo "已重命名为: ${IMG_PREFIX}.${SOURCE_IMG#*.}"
+          else
+            echo "错误：未找到任何可重命名的固件文件！"
+            ls -lh
+            exit 1
+          fi
+          # 5. 设置输出变量
+          echo "FIRMWARE_REL_PATH=openwrt/bin/targets/*/*" >> $GITHUB_ENV
+
+      - name: 上传固件到Release
+        if: env.UPLOAD_RELEASES == 'true' && steps.compile.outcome == 'success' && !cancelled()
+        uses: ncipollo/release-action@v1
+        with:
+          name: ${{ env.REPO_NAME }}/${{ env.DEVICE_TARGET }}/${{ env.DEVICE_SUBTARGET }}
+          allowUpdates: true
+          tag: ${{ env.REPO_NAME }}/${{ env.DEVICE_TARGET }}/${{ env.DEVICE_SUBTARGET }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.FIRMWARE_REL_PATH }}/*.img.*
+          removeArtifacts: true
+          body: |
+            ### 编译信息
+            - 固件类型：${{ env.REPO_NAME }}/${{ env.DEVICE_TARGET }}/${{ env.DEVICE_SUBTARGET }}
+            - 总耗时：${{ env.BUILD_TIME }}
+            - 内核版本：**${{ env.VERSION_KERNEL }}**
+            ### LuCI插件清单
+            `${{ env.WRT_LIST }}`
+
+      - name: 删除旧缓存
+        if: steps.compile.outcome == 'success' && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --key "${{ env.REPO_NAME }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.WRT_HASH }}" --json key --jq '.[].key' | while read -r key; do
+            [ -n "$key" ] || continue
+            if [ "$key" != "${{ env.REPO_NAME }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.WRT_HASH }}" ]; then
+              gh cache delete "$key" || true
+            fi
+          done
+
+      - name: 发送企业微信通知
+        if: always() # 无论成功或失败都执行
+        run: |
+          # 判断编译结果
+          if [ "${{ steps.compile.outcome }}" == "success" ]; then
+            STATUS="✅ 编译成功"
+            COLOR="info"
+            MSG="固件已打包并上传至 Release。"
+          else
+            STATUS="❌ 编译失败"
+            COLOR="warning"
+            MSG="请检查 Actions 日志以排查错误。"
+          fi
+          # 构造消息内容 (Markdown格式)
+          PAYLOAD=$(cat <<EOF
+          {
+            "msgtype": "markdown",
+            "markdown": {
+              "content": "### OpenWrt 编译通知\n> **状态：** <font color=\"$COLOR\">$STATUS</font>\n> **固件类型：** ${{ env.FIRMWARE_TAG }}\n> **编译耗时：** ${{ env.BUILD_TIME }}\n> **触发分支：** ${{ github.ref_name }}\n> **编译时间：** ${{ env.FILE_TIME1 }}\n\n$MSG\n[点击查看编译日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            }
+          }
+          EOF
+          )
+          # 发送 POST 请求到企业微信机器人
+          curl -s -H "Content-Type: application/json" -X POST -d "$PAYLOAD" "$WEIXIN_WEBHOOK"
+
+      - name: 删除运行记录
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0
